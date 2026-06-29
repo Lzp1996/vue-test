@@ -31,19 +31,24 @@ jobs:
             exit 1
           fi
 
-      - name: Fetch PR diff
-        run: gh pr diff ${{ github.event.pull_request.number }} > pr.diff
-
       - name: Claude review and post comment
         uses: actions/github-script@v8
         env:
           HOTAI_API_KEY: ${{ secrets.HOTAI_API_KEY }}
         with:
           script: |
-            const fs = require('fs');
-
-            const diff = fs.readFileSync('pr.diff', 'utf8');
             const prNumber = context.payload.pull_request.number;
+
+            // 用 GitHub API 取 diff，无需 checkout（gh pr diff 依赖 .git）
+            const diff = await github.request(
+              'GET /repos/{owner}/{repo}/pulls/{pull_number}',
+              {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                pull_number: prNumber,
+                headers: { accept: 'application/vnd.github.diff' },
+              }
+            ).then((res) => String(res.data));
 
             const prompt = [
               `REPO: ${context.repo.owner}/${context.repo.repo}`,
