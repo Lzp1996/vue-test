@@ -52,13 +52,15 @@ jobs:
             echo "PR NUMBER: ${{ github.event.pull_request.number }}"
             echo ""
             echo "Vue 3 + Vite 静态站，GitHub Pages base 为 /vue-test/。"
-            echo "遵循 CLAUDE.md 审查标准。不要调用任何工具，只输出 JSON。"
+            echo "遵循 CLAUDE.md 审查标准。"
+            echo ""
+            echo "要求：不要调用任何工具，不要输出 JSON，直接输出 PR 评论 markdown 正文。"
             echo ""
             echo "--- PR DIFF ---"
             cat pr.diff
             echo "--- END DIFF ---"
             echo ""
-            echo "请根据 diff 输出 JSON，body 字段为 PR 评论 markdown，格式："
+            echo "输出格式（必须严格遵守）："
             echo "## 审查结论"
             echo "- 状态: APPROVE 或 BLOCK"
             echo "- 风险等级: low / medium / high"
@@ -73,7 +75,7 @@ jobs:
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-      # prompt 参数 = Headless 自动化模式（非 @claude 交互）
+      # prompt 参数 = Headless 自动化模式
       - name: Claude PR Review (headless)
         id: claude
         uses: anthropics/claude-code-action@v1
@@ -83,35 +85,70 @@ jobs:
           claude_args: |
             --max-turns 5
             --model claude-sonnet-4-6
-            --json-schema '{"type":"object","properties":{"body":{"type":"string","description":"PR review comment in markdown"}},"required":["body"],"additionalProperties":false}'
 
       - name: Post PR comment
         uses: actions/github-script@v7
         env:
-          STRUCTURED: ${{ steps.claude.outputs.structured_output }}
+          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
         with:
           script: |
             const fs = require('fs');
+
+            function extractFromExecutionFile(filePath) {
+              if (!filePath || !fs.existsSync(filePath)) return '';
+
+              const raw = fs.readFileSync(filePath, 'utf8');
+              let lastText = '';
+
+              for (const line of raw.split('\n')) {
+                if (!line.trim()) continue;
+                try {
+                  const obj = JSON.parse(line);
+                  const content = obj.message?.content ?? obj.content;
+                  if (Array.isArray(content)) {
+                    const text = content
+                      .filter((part) => part.type === 'text' && part.text)
+                      .map((part) => part.text)
+                      .join('\n');
+                    if (text) lastText = text;
+                  } else if (typeof content === 'string') {
+                    lastText = content;
+                  } else if (typeof obj.result === 'string') {
+                    lastText = obj.result;
+                  }
+                } catch {
+                  // ignore non-JSON lines
+                }
+              }
+
+              return lastText.trim();
+            }
+
+            function normalizeBody(text) {
+              const fenced = text.match(/```(?:markdown|md)?\s*([\s\S]*?)```/i);
+              if (fenced) text = fenced[1].trim();
+
+              const start = text.indexOf('## 审查结论');
+              if (start >= 0) text = text.slice(start);
+
+              return text.trim();
+            }
+
             const prNumber = context.payload.pull_request.number;
+            let body = extractFromExecutionFile(process.env.EXEC_FILE);
 
-            if (!process.env.STRUCTURED) {
-              core.setFailed('Claude 未返回 structured_output，请检查 HotAI 或 max-turns。');
+            if (!body.includes('## 审查结论')) {
+              core.setFailed('未能从 Claude 输出中解析审查评论，请查看 Claude PR Review 步骤日志。');
               return;
             }
 
-            const data = JSON.parse(process.env.STRUCTURED);
-            if (!data.body) {
-              core.setFailed('Claude 输出缺少 body 字段。');
-              return;
-            }
-
-            fs.writeFileSync('comment.md', data.body);
+            body = normalizeBody(body);
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: prNumber,
-              body: data.body,
+              body,
             });
 
             core.info('PR 审查评论已发布。');
