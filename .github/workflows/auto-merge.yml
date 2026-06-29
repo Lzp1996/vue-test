@@ -21,7 +21,8 @@ jobs:
       (github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
         github.event.comment.user.type == 'Bot' &&
-        contains(github.event.comment.body, '状态: APPROVE') &&
+        contains(github.event.comment.body, '## 审查结论') &&
+        contains(github.event.comment.body, '- 状态: APPROVE') &&
         contains(github.event.comment.body, '能否自动部署: yes'))
     runs-on: ubuntu-latest
     env:
@@ -34,18 +35,44 @@ jobs:
           script: |
             const owner = context.repo.owner;
             const repo = context.repo.repo;
-            let prNumber;
 
-            if (context.eventName === 'issue_comment') {
-              prNumber = context.issue.number;
-            } else {
-              const pulls = context.payload.workflow_run.pull_requests || [];
-              if (pulls.length === 0) {
-                core.info('No PR linked to workflow run, skip.');
-                return;
-              }
-              prNumber = pulls[0].number;
+            function isApprovedComment(body) {
+              if (!body || /状态:\s*BLOCK\b/.test(body)) return false;
+              return (
+                /状态:\s*APPROVE\b/.test(body) &&
+                /能否自动部署:\s*yes\b/.test(body)
+              );
             }
+
+            async function resolvePrNumber() {
+              if (context.eventName === 'issue_comment') {
+                return context.issue.number;
+              }
+
+              const pulls = context.payload.workflow_run.pull_requests || [];
+              if (pulls.length > 0) {
+                return pulls[0].number;
+              }
+
+              const headSha = context.payload.workflow_run.head_sha;
+              const { data: prs } =
+                await github.rest.repos.listPullRequestsAssociatedWithCommit({
+                  owner,
+                  repo,
+                  commit_sha: headSha,
+                });
+
+              const openPr = prs.find((pr) => pr.state === 'open');
+              if (openPr) {
+                return openPr.number;
+              }
+
+              core.info(`No open PR linked to commit ${headSha}, skip.`);
+              return null;
+            }
+
+            const prNumber = await resolvePrNumber();
+            if (!prNumber) return;
 
             const { data: pr } = await github.rest.pulls.get({
               owner,
@@ -79,10 +106,8 @@ jobs:
               issue_number: prNumber,
             });
 
-            const approved = comments.some(
-              (comment) =>
-                comment.body.includes('状态: APPROVE') &&
-                comment.body.includes('能否自动部署: yes')
+            const approved = comments.some((comment) =>
+              isApprovedComment(comment.body)
             );
 
             if (!approved) {

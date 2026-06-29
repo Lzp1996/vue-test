@@ -64,12 +64,12 @@ jobs:
             cat pr.diff
             echo "--- END DIFF ---"
             echo ""
-            echo "输出格式（严格遵守，状态与能否自动部署必须是单一取值，不要写「或」）："
+            echo "输出格式（严格遵守，每行只填一个实际结论，禁止写「或」）："
             echo "## 审查结论"
-            echo "- 状态: APPROVE"
-            echo "- 风险等级: low"
-            echo "- 能否自动部署: yes"
-            echo "- 理由: （一句话）"
+            echo "- 状态: <APPROVE 或 BLOCK，按 diff 实际判断>"
+            echo "- 风险等级: <low 或 medium 或 high>"
+            echo "- 能否自动部署: <yes 或 no>"
+            echo "- 理由: <一句话>"
             echo ""
             echo "## 问题列表"
             echo "（无则写「无」）"
@@ -87,7 +87,7 @@ jobs:
           anthropic_api_key: ${{ secrets.HOTAI_API_KEY }}
           prompt: ${{ steps.build.outputs.text }}
           claude_args: |
-            --max-turns 2
+            --max-turns 3
             --model claude-sonnet-4-6
 
       - name: Post PR comment
@@ -160,11 +160,22 @@ jobs:
 
             body = normalizeBody(body);
 
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-              body,
-            });
-
-            core.info('PR 审查评论已发布。');
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: prNumber,
+                body,
+              });
+              core.info('PR 审查评论已发布。');
+            } catch (error) {
+              core.warning(`GitHub API 发评论失败，尝试 gh pr comment: ${error.message}`);
+              const { execSync } = require('child_process');
+              const tmpFile = `${process.env.RUNNER_TEMP}/review-comment.md`;
+              fs.writeFileSync(tmpFile, body);
+              execSync(`gh pr comment ${prNumber} --body-file "${tmpFile}"`, {
+                env: { ...process.env, GH_TOKEN: process.env.GITHUB_TOKEN },
+                stdio: 'inherit',
+              });
+              core.info('PR 审查评论已通过 gh 发布。');
+            }
