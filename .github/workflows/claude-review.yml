@@ -52,34 +52,22 @@ jobs:
             echo "PR NUMBER: ${{ github.event.pull_request.number }}"
             echo ""
             echo "你是 PR 代码审查 Bot。Vue 3 + Vite 静态站，GitHub Pages base 为 /vue-test/。"
-            echo "不要调用任何工具，不要读文件，不要运行命令，只输出 PR 评论 markdown 正文。"
+            echo "不要调用任何工具，不要读文件，不要运行命令。"
+            echo "按 json-schema 返回结构化审查结果（字段名见 schema，不要用 markdown）。"
             echo ""
             echo "审查标准："
-            echo "- low / APPROVE / 能否自动部署 yes：仅改 src/ 下 UI、文案、样式，无密钥"
-            echo "- high / BLOCK / no：改 workflow 且明显错误、泄露密钥、vite base 非 /vue-test/、会导致 build 失败"
-            echo "- medium / 需确认 / no：package.json 大版本依赖、改 deploy/Pages 配置、删重要文件"
-            echo "- 能否自动部署 yes 仅当：APPROVE + low + 改动仅在 src/"
+            echo "- status=APPROVE, risk_level=low, auto_deploy=yes：仅改 src/ 下 UI、文案、样式，无密钥"
+            echo "- status=BLOCK, auto_deploy=no：改 workflow 且明显错误、泄露密钥、vite base 非 /vue-test/、会导致 build 失败"
+            echo "- auto_deploy=no：package.json 大版本依赖、改 deploy/Pages 配置、删重要文件"
+            echo "- auto_deploy=yes 仅当：APPROVE + low + 改动仅在 src/"
             echo ""
             echo "--- PR DIFF ---"
             cat pr.diff
             echo "--- END DIFF ---"
-            echo ""
-            echo "输出格式（严格遵守，每行只填一个实际结论，禁止写「或」）："
-            echo "## 审查结论"
-            echo "- 状态: <APPROVE 或 BLOCK，按 diff 实际判断>"
-            echo "- 风险等级: <low 或 medium 或 high>"
-            echo "- 能否自动部署: <yes 或 no>"
-            echo "- 理由: <一句话>"
-            echo ""
-            echo "## 问题列表"
-            echo "（无则写「无」）"
-            echo ""
-            echo "## 修改建议"
-            echo "（无则写「无」）"
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 
-      # prompt 参数 = Headless，单次文本输出，不占 tool turns
+      # prompt = Headless；--json-schema 输出结构化 JSON，避免解析 execution_file
       - name: Claude PR Review (headless)
         id: claude
         uses: anthropics/claude-code-action@v1
@@ -89,60 +77,115 @@ jobs:
           claude_args: |
             --max-turns 3
             --model claude-sonnet-4-6
+            --output-format json
+            --json-schema '{"type":"object","properties":{"status":{"type":"string","enum":["APPROVE","BLOCK"]},"risk_level":{"type":"string","enum":["low","medium","high"]},"auto_deploy":{"type":"string","enum":["yes","no"]},"reason":{"type":"string"},"issues":{"type":"string"},"suggestions":{"type":"string"}},"required":["status","risk_level","auto_deploy","reason","issues","suggestions"],"additionalProperties":false}'
 
       - name: Post PR comment
         uses: actions/github-script@v8
         env:
           EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
+          STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
         with:
           script: |
             const fs = require('fs');
 
+            function buildBodyFromStructured(data) {
+              return [
+                '## 审查结论',
+                `- 状态: ${data.status}`,
+                `- 风险等级: ${data.risk_level}`,
+                `- 能否自动部署: ${data.auto_deploy}`,
+                `- 理由: ${data.reason}`,
+                '',
+                '## 问题列表',
+                data.issues?.trim() || '无',
+                '',
+                '## 修改建议',
+                data.suggestions?.trim() || '无',
+              ].join('\n');
+            }
+
+            function extractAssistantText(item) {
+              if (typeof item.content === 'string') return item.content;
+              if (Array.isArray(item.content)) {
+                return item.content
+                  .filter((part) => part.type === 'text' && part.text)
+                  .map((part) => part.text)
+                  .join('\n');
+              }
+              const messageContent = item.message?.content;
+              if (Array.isArray(messageContent)) {
+                return messageContent
+                  .filter((part) => part.type === 'text' && part.text)
+                  .map((part) => part.text)
+                  .join('\n');
+              }
+              if (typeof messageContent === 'string') return messageContent;
+              return '';
+            }
+
+            function collectFromEvents(events, out) {
+              if (!Array.isArray(events)) return;
+
+              for (const item of events) {
+                if (
+                  item.type === 'result' &&
+                  typeof item.result === 'string' &&
+                  item.result.includes('审查结论')
+                ) {
+                  out.resultText = item.result.trim();
+                }
+
+                const assistantText = extractAssistantText(item);
+                if (assistantText.includes('审查结论')) {
+                  out.lastAssistantText = assistantText.trim();
+                }
+
+                if (Array.isArray(item.content)) collectFromEvents(item.content, out);
+                if (Array.isArray(item.message?.content)) {
+                  collectFromEvents(item.message.content, out);
+                }
+              }
+            }
+
             function extractFromExecutionFile(filePath) {
               if (!filePath || !fs.existsSync(filePath)) return '';
 
-              const raw = fs.readFileSync(filePath, 'utf8');
-              let resultText = '';
-              let lastAssistantText = '';
+              const raw = fs.readFileSync(filePath, 'utf8').trim();
+              const out = { resultText: '', lastAssistantText: '' };
 
-              for (const line of raw.split('\n')) {
-                if (!line.trim()) continue;
-                try {
-                  const obj = JSON.parse(line);
-
-                  // headless 最终输出在 type=result 行，必须优先使用
-                  if (
-                    obj.type === 'result' &&
-                    typeof obj.result === 'string' &&
-                    obj.result.includes('审查结论')
-                  ) {
-                    resultText = obj.result.trim();
+              // 新格式：整文件 JSON 数组
+              try {
+                const parsed = JSON.parse(raw);
+                if (Array.isArray(parsed)) {
+                  collectFromEvents(parsed, out);
+                } else if (
+                  parsed.type === 'result' &&
+                  typeof parsed.result === 'string'
+                ) {
+                  out.resultText = parsed.result.trim();
+                } else if (typeof parsed.result === 'string') {
+                  out.resultText = parsed.result.trim();
+                }
+              } catch {
+                // 旧格式：JSONL 每行一个对象
+                for (const line of raw.split('\n')) {
+                  if (!line.trim()) continue;
+                  try {
+                    collectFromEvents([JSON.parse(line)], out);
+                  } catch {
+                    // ignore
                   }
-
-                  const content = obj.message?.content;
-                  if (Array.isArray(content)) {
-                    const text = content
-                      .filter((part) => part.type === 'text' && part.text)
-                      .map((part) => part.text)
-                      .join('\n');
-                    if (text.includes('审查结论')) lastAssistantText = text.trim();
-                  }
-                } catch {
-                  // ignore non-JSON lines
                 }
               }
 
-              if (resultText) return resultText;
-              if (lastAssistantText) return lastAssistantText;
-
-              return '';
+              return out.resultText || out.lastAssistantText || '';
             }
 
             function normalizeBody(text) {
               const fenced = text.match(/```(?:markdown|md)?\s*([\s\S]*?)```/i);
               if (fenced) text = fenced[1].trim();
 
-              // 兼容缺少 ## 前缀的情况
               if (!text.includes('## 审查结论')) {
                 text = text.replace(/(^|\n)审查结论/m, '$1## 审查结论');
               }
@@ -150,7 +193,6 @@ jobs:
               const start = text.indexOf('## 审查结论');
               if (start >= 0) text = text.slice(start);
 
-              // 截断误混入的 JSONL / 日志尾巴
               const cutAt = text.search(/\n\s*[\[{]|\\n",|\n"type"\s*:/);
               if (cutAt > 0) text = text.slice(0, cutAt);
 
@@ -158,22 +200,34 @@ jobs:
             }
 
             const prNumber = context.payload.pull_request.number;
-            const execFile = process.env.EXEC_FILE;
-            let body = extractFromExecutionFile(execFile);
+            let body = '';
+
+            const structuredRaw = process.env.STRUCTURED_OUTPUT?.trim();
+            if (structuredRaw) {
+              try {
+                const data = JSON.parse(structuredRaw);
+                body = buildBodyFromStructured(data);
+                core.info('已从 structured_output 生成审查评论。');
+              } catch (error) {
+                core.warning(`structured_output 解析失败: ${error.message}`);
+              }
+            }
 
             if (!body.includes('## 审查结论')) {
-              core.error(`execution_file: ${execFile || '(empty)'}`);
-              if (execFile && fs.existsSync(execFile)) {
-                const preview = fs.readFileSync(execFile, 'utf8').slice(0, 800);
+              body = extractFromExecutionFile(process.env.EXEC_FILE);
+              body = normalizeBody(body);
+            }
+
+            if (!body.includes('## 审查结论')) {
+              core.error(`execution_file: ${process.env.EXEC_FILE || '(empty)'}`);
+              if (process.env.EXEC_FILE && fs.existsSync(process.env.EXEC_FILE)) {
+                const preview = fs.readFileSync(process.env.EXEC_FILE, 'utf8').slice(0, 800);
                 core.error(`output preview:\n${preview}`);
               }
               core.setFailed('未能从 Claude 输出中解析审查评论，请查看 Claude PR Review 步骤日志。');
               return;
             }
 
-            body = normalizeBody(body);
-
-            // 明确标识为 Claude 自动审查（作者仍是 github-actions[bot]）
             body = `<!-- claude-code-review -->\n${body}`;
 
             try {
