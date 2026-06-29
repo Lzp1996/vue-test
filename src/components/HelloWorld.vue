@@ -1,8 +1,6 @@
 <script setup>
 import { ref } from 'vue'
-import viteLogo from '../assets/vite.svg'
-import heroImg from '../assets/hero.png'
-import vueLogo from '../assets/vue.svg'
+import picImg from '../assets/pic.png'
 
 const count = ref(0)
 </script>
@@ -10,9 +8,7 @@ const count = ref(0)
 <template>
   <section id="center">
     <div class="hero">
-      <img :src="heroImg" class="base" width="170" height="179" alt="" />
-      <img :src="vueLogo" class="framework" alt="Vue logo" />
-      <img :src="viteLogo" class="vite" alt="Vite logo" />
+      <img :src="picImg" class="base" style="width: 800px; height: 400px;" />
     </div>
     <div>
       <h1>Get started</h1>
