@@ -52,6 +52,7 @@ jobs:
             PR NUMBER: ${{ github.event.pull_request.number }}
 
             Vue 3 + Vite 静态站，GitHub Pages base 为 /vue-test/。
+            请遵循仓库根目录 CLAUDE.md 的审查标准。
             PR diff 已写入 pr.diff，不要运行 gh pr diff，不要读其它文件。
 
             严格 2 步完成：
