@@ -102,34 +102,38 @@ jobs:
               if (!filePath || !fs.existsSync(filePath)) return '';
 
               const raw = fs.readFileSync(filePath, 'utf8');
-              let lastText = '';
+              let resultText = '';
+              let lastAssistantText = '';
 
               for (const line of raw.split('\n')) {
                 if (!line.trim()) continue;
                 try {
                   const obj = JSON.parse(line);
-                  const content = obj.message?.content ?? obj.content ?? obj.text;
+
+                  // headless 最终输出在 type=result 行，必须优先使用
+                  if (
+                    obj.type === 'result' &&
+                    typeof obj.result === 'string' &&
+                    obj.result.includes('审查结论')
+                  ) {
+                    resultText = obj.result.trim();
+                  }
+
+                  const content = obj.message?.content;
                   if (Array.isArray(content)) {
                     const text = content
                       .filter((part) => part.type === 'text' && part.text)
                       .map((part) => part.text)
                       .join('\n');
-                    if (text) lastText = text;
-                  } else if (typeof content === 'string') {
-                    lastText = content;
-                  } else if (typeof obj.result === 'string') {
-                    lastText = obj.result;
+                    if (text.includes('审查结论')) lastAssistantText = text.trim();
                   }
                 } catch {
                   // ignore non-JSON lines
                 }
               }
 
-              if (lastText.trim()) return lastText.trim();
-
-              // fallback: 直接从原始日志中提取 markdown 块
-              const idx = raw.indexOf('## 审查结论');
-              if (idx >= 0) return raw.slice(idx).trim();
+              if (resultText) return resultText;
+              if (lastAssistantText) return lastAssistantText;
 
               return '';
             }
@@ -138,8 +142,17 @@ jobs:
               const fenced = text.match(/```(?:markdown|md)?\s*([\s\S]*?)```/i);
               if (fenced) text = fenced[1].trim();
 
+              // 兼容缺少 ## 前缀的情况
+              if (!text.includes('## 审查结论')) {
+                text = text.replace(/(^|\n)审查结论/m, '$1## 审查结论');
+              }
+
               const start = text.indexOf('## 审查结论');
               if (start >= 0) text = text.slice(start);
+
+              // 截断误混入的 JSONL / 日志尾巴
+              const cutAt = text.search(/\n\s*[\[{]|\\n",|\n"type"\s*:/);
+              if (cutAt > 0) text = text.slice(0, cutAt);
 
               return text.trim();
             }
@@ -159,6 +172,9 @@ jobs:
             }
 
             body = normalizeBody(body);
+
+            // 明确标识为 Claude 自动审查（作者仍是 github-actions[bot]）
+            body = `<!-- claude-code-review -->\n${body}`;
 
             try {
               await github.rest.issues.createComment({
