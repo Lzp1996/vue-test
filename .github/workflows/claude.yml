@@ -12,8 +12,9 @@ on:
     types: [submitted]
 
 env:
-  ANTHROPIC_BASE_URL: https://www.hotaitool.net
+  ANTHROPIC_BASE_URL: "https://www.hotaitool.net"
   ANTHROPIC_AUTH_TOKEN: ${{ secrets.HOTAI_API_KEY }}
+  ANTHROPIC_MODEL: "claude-sonnet-4-6"
   CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 
@@ -43,6 +44,7 @@ jobs:
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.HOTAI_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           claude_args: |
-            --max-turns 3
+            --max-turns 8
             --model claude-sonnet-4-6

@@ -6,8 +6,9 @@ on:
     types: [opened, synchronize, reopened]
 
 env:
-  ANTHROPIC_BASE_URL: https://www.hotaitool.net
+  ANTHROPIC_BASE_URL: "https://www.hotaitool.net"
   ANTHROPIC_AUTH_TOKEN: ${{ secrets.HOTAI_API_KEY }}
+  ANTHROPIC_MODEL: "claude-sonnet-4-6"
   CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 
@@ -22,16 +23,30 @@ jobs:
     timeout-minutes: 15
 
     steps:
-      - name: Checkout
+      - name: Check HOTAI_API_KEY
+        env:
+          HOTAI_API_KEY: ${{ secrets.HOTAI_API_KEY }}
+        run: |
+          if [ -z "$HOTAI_API_KEY" ]; then
+            echo "::error::未配置 HOTAI_API_KEY。请到仓库 Settings → Secrets and variables → Actions 添加。"
+            exit 1
+          fi
+
+      - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - name: Claude PR Review
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.HOTAI_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
             请审查这个 Pull Request，仓库是 Vue 3 + Vite 静态站点，部署到 GitHub Pages。
 
             重点检查：
@@ -55,6 +70,6 @@ jobs:
             ## 修改建议
             （无建议则写「无」）
           claude_args: |
-            --max-turns 3
+            --max-turns 8
             --model claude-sonnet-4-6
             --allowedTools Read,Grep,Glob,Bash(git diff:*),Bash(git log:*)
