@@ -43,112 +43,38 @@ jobs:
       - name: Fetch PR diff
         run: gh pr diff ${{ github.event.pull_request.number }} > pr.diff
 
-      - name: Build review prompt
-        id: build
-        run: |
-          {
-            echo 'text<<EOF'
-            echo "REPO: ${{ github.repository }}"
-            echo "PR NUMBER: ${{ github.event.pull_request.number }}"
-            echo ""
-            echo "Vue 3 + Vite 静态站，GitHub Pages base 为 /vue-test/。"
-            echo "遵循 CLAUDE.md 审查标准。"
-            echo ""
-            echo "要求：不要调用任何工具，不要输出 JSON，直接输出 PR 评论 markdown 正文。"
-            echo ""
-            echo "--- PR DIFF ---"
-            cat pr.diff
-            echo "--- END DIFF ---"
-            echo ""
-            echo "输出格式（必须严格遵守）："
-            echo "## 审查结论"
-            echo "- 状态: APPROVE 或 BLOCK"
-            echo "- 风险等级: low / medium / high"
-            echo "- 能否自动部署: yes 或 no"
-            echo "- 理由: （一句话）"
-            echo ""
-            echo "## 问题列表"
-            echo "（无则写「无」）"
-            echo ""
-            echo "## 修改建议"
-            echo "（无则写「无」）"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      # prompt 参数 = Headless 自动化模式
-      - name: Claude PR Review (headless)
-        id: claude
+      - name: Claude PR Review
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.HOTAI_API_KEY }}
-          prompt: ${{ steps.build.outputs.text }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            Vue 3 + Vite 静态站，GitHub Pages base 为 /vue-test/。
+            请遵循仓库根目录 CLAUDE.md 的审查标准。
+            PR diff 已写入 pr.diff，不要运行 gh pr diff，不要读其它文件。
+
+            严格 2 步完成：
+            1. Read pr.diff（只读一次）
+            2. 运行一次 gh pr comment ${{ github.event.pull_request.number }} --body "..." 发评论
+
+            评论 body 格式：
+
+            ## 审查结论
+            - 状态: APPROVE 或 BLOCK
+            - 风险等级: low / medium / high
+            - 能否自动部署: yes / no
+            - 理由: （一句话）
+
+            ## 问题列表
+            （无则写「无」）
+
+            ## 修改建议
+            （无则写「无」）
+
+            发完评论立即结束。
           claude_args: |
             --max-turns 5
             --model claude-sonnet-4-6
-
-      - name: Post PR comment
-        uses: actions/github-script@v8
-        env:
-          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
-        with:
-          script: |
-            const fs = require('fs');
-
-            function extractFromExecutionFile(filePath) {
-              if (!filePath || !fs.existsSync(filePath)) return '';
-
-              const raw = fs.readFileSync(filePath, 'utf8');
-              let lastText = '';
-
-              for (const line of raw.split('\n')) {
-                if (!line.trim()) continue;
-                try {
-                  const obj = JSON.parse(line);
-                  const content = obj.message?.content ?? obj.content;
-                  if (Array.isArray(content)) {
-                    const text = content
-                      .filter((part) => part.type === 'text' && part.text)
-                      .map((part) => part.text)
-                      .join('\n');
-                    if (text) lastText = text;
-                  } else if (typeof content === 'string') {
-                    lastText = content;
-                  } else if (typeof obj.result === 'string') {
-                    lastText = obj.result;
-                  }
-                } catch {
-                  // ignore non-JSON lines
-                }
-              }
-
-              return lastText.trim();
-            }
-
-            function normalizeBody(text) {
-              const fenced = text.match(/```(?:markdown|md)?\s*([\s\S]*?)```/i);
-              if (fenced) text = fenced[1].trim();
-
-              const start = text.indexOf('## 审查结论');
-              if (start >= 0) text = text.slice(start);
-
-              return text.trim();
-            }
-
-            const prNumber = context.payload.pull_request.number;
-            let body = extractFromExecutionFile(process.env.EXEC_FILE);
-
-            if (!body.includes('## 审查结论')) {
-              core.setFailed('未能从 Claude 输出中解析审查评论，请查看 Claude PR Review 步骤日志。');
-              return;
-            }
-
-            body = normalizeBody(body);
-
-            await github.rest.issues.createComment({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              issue_number: prNumber,
-              body,
-            });
-
-            core.info('PR 审查评论已发布。');
+            --allowedTools "Read,Bash(gh pr comment:*)"
