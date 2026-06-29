@@ -43,38 +43,75 @@ jobs:
       - name: Fetch PR diff
         run: gh pr diff ${{ github.event.pull_request.number }} > pr.diff
 
-      - name: Claude PR Review
+      - name: Build review prompt
+        id: build
+        run: |
+          {
+            echo 'text<<EOF'
+            echo "REPO: ${{ github.repository }}"
+            echo "PR NUMBER: ${{ github.event.pull_request.number }}"
+            echo ""
+            echo "Vue 3 + Vite 静态站，GitHub Pages base 为 /vue-test/。"
+            echo "遵循 CLAUDE.md 审查标准。不要调用任何工具，只输出 JSON。"
+            echo ""
+            echo "--- PR DIFF ---"
+            cat pr.diff
+            echo "--- END DIFF ---"
+            echo ""
+            echo "请根据 diff 输出 JSON，body 字段为 PR 评论 markdown，格式："
+            echo "## 审查结论"
+            echo "- 状态: APPROVE 或 BLOCK"
+            echo "- 风险等级: low / medium / high"
+            echo "- 能否自动部署: yes 或 no"
+            echo "- 理由: （一句话）"
+            echo ""
+            echo "## 问题列表"
+            echo "（无则写「无」）"
+            echo ""
+            echo "## 修改建议"
+            echo "（无则写「无」）"
+            echo 'EOF'
+          } >> "$GITHUB_OUTPUT"
+
+      # prompt 参数 = Headless 自动化模式（非 @claude 交互）
+      - name: Claude PR Review (headless)
+        id: claude
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.HOTAI_API_KEY }}
-          prompt: |
-            REPO: ${{ github.repository }}
-            PR NUMBER: ${{ github.event.pull_request.number }}
-
-            Vue 3 + Vite 静态站，GitHub Pages base 为 /vue-test/。
-            请遵循仓库根目录 CLAUDE.md 的审查标准。
-            PR diff 已写入 pr.diff，不要运行 gh pr diff，不要读其它文件。
-
-            严格 2 步完成：
-            1. Read pr.diff（只读一次）
-            2. 运行一次 gh pr comment ${{ github.event.pull_request.number }} --body "..." 发评论
-
-            评论 body 格式：
-
-            ## 审查结论
-            - 状态: APPROVE 或 BLOCK
-            - 风险等级: low / medium / high
-            - 能否自动部署: yes / no
-            - 理由: （一句话）
-
-            ## 问题列表
-            （无则写「无」）
-
-            ## 修改建议
-            （无则写「无」）
-
-            发完评论立即结束。
+          prompt: ${{ steps.build.outputs.text }}
           claude_args: |
             --max-turns 5
             --model claude-sonnet-4-6
-            --allowedTools "Read,Bash(gh pr comment:*)"
+            --json-schema '{"type":"object","properties":{"body":{"type":"string","description":"PR review comment in markdown"}},"required":["body"],"additionalProperties":false}'
+
+      - name: Post PR comment
+        uses: actions/github-script@v7
+        env:
+          STRUCTURED: ${{ steps.claude.outputs.structured_output }}
+        with:
+          script: |
+            const fs = require('fs');
+            const prNumber = context.payload.pull_request.number;
+
+            if (!process.env.STRUCTURED) {
+              core.setFailed('Claude 未返回 structured_output，请检查 HotAI 或 max-turns。');
+              return;
+            }
+
+            const data = JSON.parse(process.env.STRUCTURED);
+            if (!data.body) {
+              core.setFailed('Claude 输出缺少 body 字段。');
+              return;
+            }
+
+            fs.writeFileSync('comment.md', data.body);
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body: data.body,
+            });
+
+            core.info('PR 审查评论已发布。');
