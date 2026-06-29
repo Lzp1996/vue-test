@@ -6,8 +6,9 @@ on:
     types: [opened, synchronize, reopened]
 
 env:
-  ANTHROPIC_BASE_URL: https://www.hotaitool.net
+  ANTHROPIC_BASE_URL: "https://www.hotaitool.net"
   ANTHROPIC_AUTH_TOKEN: ${{ secrets.HOTAI_API_KEY }}
+  ANTHROPIC_MODEL: "claude-sonnet-4-6"
   CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 
@@ -15,46 +16,64 @@ permissions:
   contents: read
   pull-requests: write
   issues: write
+  id-token: write
 
 jobs:
   review:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
 
     steps:
-      - name: Checkout
+      - name: Check HOTAI_API_KEY
+        env:
+          HOTAI_API_KEY: ${{ secrets.HOTAI_API_KEY }}
+        run: |
+          if [ -z "$HOTAI_API_KEY" ]; then
+            echo "::error::未配置 HOTAI_API_KEY。请到仓库 Settings → Secrets and variables → Actions 添加。"
+            exit 1
+          fi
+
+      - name: Checkout PR branch
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
+
+      - name: Fetch PR diff
+        run: gh pr diff ${{ github.event.pull_request.number }} > pr.diff
 
       - name: Claude PR Review
         uses: anthropics/claude-code-action@v1
         with:
           anthropic_api_key: ${{ secrets.HOTAI_API_KEY }}
           prompt: |
-            请审查这个 Pull Request，仓库是 Vue 3 + Vite 静态站点，部署到 GitHub Pages。
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
 
-            重点检查：
-            1. 是否有 bug、逻辑错误或安全隐患
-            2. vite.config.js 的 base 是否为 /vue-test/（与 GitHub 仓库名一致）
-            3. .github/workflows/ 改动是否正确（尤其 deploy.yml 需有 environment: github-pages）
-            4. 是否误提交密钥、.env、node_modules
-            5. 构建相关改动是否会导致 npm ci / npm run build 失败
+            Vue 3 + Vite 静态站，GitHub Pages base 为 /vue-test/。
+            PR diff 已写入 pr.diff，不要运行 gh pr diff，不要读其它文件。
 
-            请在 PR 评论中输出，格式必须包含：
+            严格 2 步完成：
+            1. Read pr.diff（只读一次）
+            2. 运行一次 gh pr comment ${{ github.event.pull_request.number }} --body "..." 发评论
+
+            评论 body 格式：
 
             ## 审查结论
             - 状态: APPROVE 或 BLOCK
             - 风险等级: low / medium / high
             - 能否自动部署: yes / no
-            - 理由: （一句话总结）
+            - 理由: （一句话）
 
             ## 问题列表
-            （无问题则写「无」）
+            （无则写「无」）
 
             ## 修改建议
-            （无建议则写「无」）
+            （无则写「无」）
+
+            发完评论立即结束。
           claude_args: |
-            --max-turns 3
+            --max-turns 5
             --model claude-sonnet-4-6
-            --allowedTools Read,Grep,Glob,Bash(git diff:*),Bash(git log:*)
+            --allowedTools "Read,Bash(gh pr comment:*)"
