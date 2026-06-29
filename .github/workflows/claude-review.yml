@@ -1,22 +1,14 @@
-# PR 打开或更新时，Claude Headless 自动审查并给出结论
+# PR 打开或更新时，Claude API 自动审查并给出结论（不经过 claude-code-action Agent SDK）
 name: Claude Code Review
 
 on:
   pull_request:
     types: [opened, synchronize, reopened]
 
-env:
-  ANTHROPIC_BASE_URL: "https://www.hotaitool.net"
-  ANTHROPIC_AUTH_TOKEN: ${{ secrets.HOTAI_API_KEY }}
-  ANTHROPIC_MODEL: "claude-sonnet-4-6"
-  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
-  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
-
 permissions:
   contents: read
   pull-requests: write
   issues: write
-  id-token: write
 
 jobs:
   review:
@@ -24,6 +16,10 @@ jobs:
     timeout-minutes: 10
     env:
       GH_TOKEN: ${{ github.token }}
+      ANTHROPIC_BASE_URL: https://www.hotaitool.net
+      ANTHROPIC_MODEL: claude-sonnet-4-6
+      CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 
     steps:
       - name: Check HOTAI_API_KEY
@@ -35,217 +31,133 @@ jobs:
             exit 1
           fi
 
-      - name: Checkout PR branch
-        uses: actions/checkout@v6
-        with:
-          fetch-depth: 1
-
       - name: Fetch PR diff
         run: gh pr diff ${{ github.event.pull_request.number }} > pr.diff
 
-      - name: Build review prompt
-        id: build
-        run: |
-          {
-            echo 'text<<EOF'
-            echo "REPO: ${{ github.repository }}"
-            echo "PR NUMBER: ${{ github.event.pull_request.number }}"
-            echo ""
-            echo "你是 PR 代码审查 Bot。Vue 3 + Vite 静态站，GitHub Pages base 为 /vue-test/。"
-            echo "不要调用任何工具，不要读文件，不要运行命令。"
-            echo "按 json-schema 返回结构化审查结果（字段名见 schema，不要用 markdown）。"
-            echo ""
-            echo "审查标准："
-            echo "- status=APPROVE, risk_level=low, auto_deploy=yes：仅改 src/ 下 UI、文案、样式，无密钥"
-            echo "- status=BLOCK, auto_deploy=no：改 workflow 且明显错误、泄露密钥、vite base 非 /vue-test/、会导致 build 失败"
-            echo "- auto_deploy=no：package.json 大版本依赖、改 deploy/Pages 配置、删重要文件"
-            echo "- auto_deploy=yes 仅当：APPROVE + low + 改动仅在 src/"
-            echo ""
-            echo "--- PR DIFF ---"
-            cat pr.diff
-            echo "--- END DIFF ---"
-            echo 'EOF'
-          } >> "$GITHUB_OUTPUT"
-
-      # prompt = Headless；--json-schema 输出结构化 JSON，避免解析 execution_file
-      - name: Claude PR Review (headless)
-        id: claude
-        uses: anthropics/claude-code-action@v1
-        with:
-          anthropic_api_key: ${{ secrets.HOTAI_API_KEY }}
-          prompt: ${{ steps.build.outputs.text }}
-          claude_args: |
-            --max-turns 3
-            --model claude-sonnet-4-6
-            --output-format json
-            --json-schema '{"type":"object","properties":{"status":{"type":"string","enum":["APPROVE","BLOCK"]},"risk_level":{"type":"string","enum":["low","medium","high"]},"auto_deploy":{"type":"string","enum":["yes","no"]},"reason":{"type":"string"},"issues":{"type":"string"},"suggestions":{"type":"string"}},"required":["status","risk_level","auto_deploy","reason","issues","suggestions"],"additionalProperties":false}'
-
-      - name: Post PR comment
+      - name: Claude review and post comment
         uses: actions/github-script@v8
         env:
-          EXEC_FILE: ${{ steps.claude.outputs.execution_file }}
-          STRUCTURED_OUTPUT: ${{ steps.claude.outputs.structured_output }}
+          HOTAI_API_KEY: ${{ secrets.HOTAI_API_KEY }}
         with:
           script: |
             const fs = require('fs');
 
-            function buildBodyFromStructured(data) {
-              return [
-                '## 审查结论',
-                `- 状态: ${data.status}`,
-                `- 风险等级: ${data.risk_level}`,
-                `- 能否自动部署: ${data.auto_deploy}`,
-                `- 理由: ${data.reason}`,
-                '',
-                '## 问题列表',
-                data.issues?.trim() || '无',
-                '',
-                '## 修改建议',
-                data.suggestions?.trim() || '无',
-              ].join('\n');
-            }
-
-            function extractAssistantText(item) {
-              if (typeof item.content === 'string') return item.content;
-              if (Array.isArray(item.content)) {
-                return item.content
-                  .filter((part) => part.type === 'text' && part.text)
-                  .map((part) => part.text)
-                  .join('\n');
-              }
-              const messageContent = item.message?.content;
-              if (Array.isArray(messageContent)) {
-                return messageContent
-                  .filter((part) => part.type === 'text' && part.text)
-                  .map((part) => part.text)
-                  .join('\n');
-              }
-              if (typeof messageContent === 'string') return messageContent;
-              return '';
-            }
-
-            function collectFromEvents(events, out) {
-              if (!Array.isArray(events)) return;
-
-              for (const item of events) {
-                if (
-                  item.type === 'result' &&
-                  typeof item.result === 'string' &&
-                  item.result.includes('审查结论')
-                ) {
-                  out.resultText = item.result.trim();
-                }
-
-                const assistantText = extractAssistantText(item);
-                if (assistantText.includes('审查结论')) {
-                  out.lastAssistantText = assistantText.trim();
-                }
-
-                if (Array.isArray(item.content)) collectFromEvents(item.content, out);
-                if (Array.isArray(item.message?.content)) {
-                  collectFromEvents(item.message.content, out);
-                }
-              }
-            }
-
-            function extractFromExecutionFile(filePath) {
-              if (!filePath || !fs.existsSync(filePath)) return '';
-
-              const raw = fs.readFileSync(filePath, 'utf8').trim();
-              const out = { resultText: '', lastAssistantText: '' };
-
-              // 新格式：整文件 JSON 数组
-              try {
-                const parsed = JSON.parse(raw);
-                if (Array.isArray(parsed)) {
-                  collectFromEvents(parsed, out);
-                } else if (
-                  parsed.type === 'result' &&
-                  typeof parsed.result === 'string'
-                ) {
-                  out.resultText = parsed.result.trim();
-                } else if (typeof parsed.result === 'string') {
-                  out.resultText = parsed.result.trim();
-                }
-              } catch {
-                // 旧格式：JSONL 每行一个对象
-                for (const line of raw.split('\n')) {
-                  if (!line.trim()) continue;
-                  try {
-                    collectFromEvents([JSON.parse(line)], out);
-                  } catch {
-                    // ignore
-                  }
-                }
-              }
-
-              return out.resultText || out.lastAssistantText || '';
-            }
-
-            function normalizeBody(text) {
-              const fenced = text.match(/```(?:markdown|md)?\s*([\s\S]*?)```/i);
-              if (fenced) text = fenced[1].trim();
-
-              if (!text.includes('## 审查结论')) {
-                text = text.replace(/(^|\n)审查结论/m, '$1## 审查结论');
-              }
-
-              const start = text.indexOf('## 审查结论');
-              if (start >= 0) text = text.slice(start);
-
-              const cutAt = text.search(/\n\s*[\[{]|\\n",|\n"type"\s*:/);
-              if (cutAt > 0) text = text.slice(0, cutAt);
-
-              return text.trim();
-            }
-
+            const diff = fs.readFileSync('pr.diff', 'utf8');
             const prNumber = context.payload.pull_request.number;
-            let body = '';
 
-            const structuredRaw = process.env.STRUCTURED_OUTPUT?.trim();
-            if (structuredRaw) {
-              try {
-                const data = JSON.parse(structuredRaw);
-                body = buildBodyFromStructured(data);
-                core.info('已从 structured_output 生成审查评论。');
-              } catch (error) {
-                core.warning(`structured_output 解析失败: ${error.message}`);
+            const prompt = [
+              `REPO: ${context.repo.owner}/${context.repo.repo}`,
+              `PR NUMBER: ${prNumber}`,
+              '',
+              '你是 PR 代码审查 Bot。Vue 3 + Vite 静态站，GitHub Pages base 为 /vue-test/。',
+              '只输出 JSON，不要 markdown，不要代码块，不要其它文字。',
+              '',
+              '审查标准：',
+              '- status=APPROVE, risk_level=low, auto_deploy=yes：仅改 src/ 下 UI、文案、样式，无密钥',
+              '- status=BLOCK, auto_deploy=no：改 workflow 且明显错误、泄露密钥、vite base 非 /vue-test/、会导致 build 失败',
+              '- auto_deploy=no：package.json 大版本依赖、改 deploy/Pages 配置、删重要文件',
+              '- auto_deploy=yes 仅当：APPROVE + low + 改动仅在 src/',
+              '',
+              'JSON 字段：status, risk_level, auto_deploy, reason, issues, suggestions',
+              'status 只能是 APPROVE 或 BLOCK；risk_level 只能是 low/medium/high；auto_deploy 只能是 yes 或 no。',
+              '',
+              '--- PR DIFF ---',
+              diff,
+              '--- END DIFF ---',
+            ].join('\n');
+
+            const response = await fetch(
+              `${process.env.ANTHROPIC_BASE_URL}/v1/messages`,
+              {
+                method: 'POST',
+                headers: {
+                  'content-type': 'application/json',
+                  'x-api-key': process.env.HOTAI_API_KEY,
+                  'anthropic-version': '2023-06-01',
+                },
+                body: JSON.stringify({
+                  model: process.env.ANTHROPIC_MODEL,
+                  max_tokens: 1024,
+                  messages: [{ role: 'user', content: prompt }],
+                }),
               }
-            }
+            );
 
-            if (!body.includes('## 审查结论')) {
-              body = extractFromExecutionFile(process.env.EXEC_FILE);
-              body = normalizeBody(body);
-            }
-
-            if (!body.includes('## 审查结论')) {
-              core.error(`execution_file: ${process.env.EXEC_FILE || '(empty)'}`);
-              if (process.env.EXEC_FILE && fs.existsSync(process.env.EXEC_FILE)) {
-                const preview = fs.readFileSync(process.env.EXEC_FILE, 'utf8').slice(0, 800);
-                core.error(`output preview:\n${preview}`);
-              }
-              core.setFailed('未能从 Claude 输出中解析审查评论，请查看 Claude PR Review 步骤日志。');
+            const raw = await response.text();
+            if (!response.ok) {
+              core.setFailed(`Claude API 错误 (${response.status}): ${raw.slice(0, 500)}`);
               return;
             }
 
-            body = `<!-- claude-code-review -->\n${body}`;
-
+            let apiData;
             try {
-              await github.rest.issues.createComment({
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                issue_number: prNumber,
-                body,
-              });
-              core.info('PR 审查评论已发布。');
-            } catch (error) {
-              core.warning(`GitHub API 发评论失败，尝试 gh pr comment: ${error.message}`);
-              const { execSync } = require('child_process');
-              const tmpFile = `${process.env.RUNNER_TEMP}/review-comment.md`;
-              fs.writeFileSync(tmpFile, body);
-              execSync(`gh pr comment ${prNumber} --body-file "${tmpFile}"`, {
-                env: { ...process.env, GH_TOKEN: process.env.GITHUB_TOKEN },
-                stdio: 'inherit',
-              });
-              core.info('PR 审查评论已通过 gh 发布。');
+              apiData = JSON.parse(raw);
+            } catch {
+              core.setFailed(`Claude API 返回非 JSON: ${raw.slice(0, 500)}`);
+              return;
             }
+
+            const answer = (apiData.content || [])
+              .filter((part) => part.type === 'text')
+              .map((part) => part.text)
+              .join('\n')
+              .trim();
+
+            core.info(`Claude 原始回复:\n${answer.slice(0, 300)}`);
+
+            function parseReviewJson(text) {
+              try {
+                return JSON.parse(text);
+              } catch {
+                const match = text.match(/\{[\s\S]*\}/);
+                if (!match) throw new Error('未找到 JSON 对象');
+                return JSON.parse(match[0]);
+              }
+            }
+
+            let data;
+            try {
+              data = parseReviewJson(answer);
+            } catch (error) {
+              core.setFailed(`无法解析 Claude 回复为 JSON: ${error.message}\n${answer.slice(0, 500)}`);
+              return;
+            }
+
+            const required = [
+              'status',
+              'risk_level',
+              'auto_deploy',
+              'reason',
+              'issues',
+              'suggestions',
+            ];
+            for (const key of required) {
+              if (!(key in data)) {
+                core.setFailed(`Claude 回复缺少字段: ${key}`);
+                return;
+              }
+            }
+
+            const body = [
+              '<!-- claude-code-review -->',
+              '## 审查结论',
+              `- 状态: ${data.status}`,
+              `- 风险等级: ${data.risk_level}`,
+              `- 能否自动部署: ${data.auto_deploy}`,
+              `- 理由: ${data.reason}`,
+              '',
+              '## 问题列表',
+              String(data.issues).trim() || '无',
+              '',
+              '## 修改建议',
+              String(data.suggestions).trim() || '无',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
+
+            core.info('PR 审查评论已发布。');
