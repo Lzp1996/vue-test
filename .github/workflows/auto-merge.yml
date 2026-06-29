@@ -11,6 +11,7 @@ permissions:
   contents: write
   pull-requests: write
   checks: read
+  actions: write
 
 jobs:
   auto-merge:
@@ -115,11 +116,26 @@ jobs:
               return;
             }
 
-            await github.rest.pulls.merge({
+            const { data: mergeResult } = await github.rest.pulls.merge({
               owner,
               repo,
               pull_number: prNumber,
               merge_method: 'merge',
             });
 
+            if (!mergeResult.merged) {
+              core.info(`PR #${prNumber} merge returned merged=false, skip deploy.`);
+              return;
+            }
+
             core.info(`PR #${prNumber} merged automatically.`);
+
+            // GITHUB_TOKEN 触发的 merge 不会触发 push → deploy.yml，需手动 dispatch
+            await github.rest.actions.createWorkflowDispatch({
+              owner,
+              repo,
+              workflow_id: 'deploy.yml',
+              ref: 'master',
+            });
+
+            core.info('Deploy workflow dispatched.');
