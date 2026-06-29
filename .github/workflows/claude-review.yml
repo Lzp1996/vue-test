@@ -1,0 +1,60 @@
+# PR 打开或更新时，Claude Headless 自动审查并给出结论
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+env:
+  ANTHROPIC_BASE_URL: https://www.hotaitool.net
+  ANTHROPIC_AUTH_TOKEN: ${{ secrets.HOTAI_API_KEY }}
+  CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS: "1"
+  CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Claude PR Review
+        uses: anthropics/claude-code-action@v1
+        with:
+          anthropic_api_key: ${{ secrets.HOTAI_API_KEY }}
+          prompt: |
+            请审查这个 Pull Request，仓库是 Vue 3 + Vite 静态站点，部署到 GitHub Pages。
+
+            重点检查：
+            1. 是否有 bug、逻辑错误或安全隐患
+            2. vite.config.js 的 base 是否为 /vue-test/（与 GitHub 仓库名一致）
+            3. .github/workflows/ 改动是否正确（尤其 deploy.yml 需有 environment: github-pages）
+            4. 是否误提交密钥、.env、node_modules
+            5. 构建相关改动是否会导致 npm ci / npm run build 失败
+
+            请在 PR 评论中输出，格式必须包含：
+
+            ## 审查结论
+            - 状态: APPROVE 或 BLOCK
+            - 风险等级: low / medium / high
+            - 能否自动部署: yes / no
+            - 理由: （一句话总结）
+
+            ## 问题列表
+            （无问题则写「无」）
+
+            ## 修改建议
+            （无建议则写「无」）
+          claude_args: |
+            --max-turns 3
+            --model claude-sonnet-4-6
+            --allowedTools Read,Grep,Glob,Bash(git diff:*),Bash(git log:*)
